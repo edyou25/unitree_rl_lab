@@ -9,7 +9,7 @@
 
 import argparse
 
-from isaaclab.app import AppLauncher
+from isaaclab.app import AppLauncher # type: ignore
 
 # local imports
 import cli_args  # isort: skip
@@ -45,22 +45,40 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import gymnasium as gym
+import logging
 import os
 import time
-import torch
+import torch # type: ignore
+
+log_file = '/workspace/unitree_rl_lab/debug.log'
+with open(log_file, 'w') as f:
+    f.write('')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, mode='w'),
+        # logging.StreamHandler() # terminal
+    ],
+    force=True
+)
+logger = logging.getLogger(__name__)
+
+
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
-import isaaclab_tasks  # noqa: F401
-from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
-from isaaclab.utils.assets import retrieve_file_path
-from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx
-from isaaclab_tasks.utils import get_checkpoint_path
+import isaaclab_tasks  # noqa: F401 # type: ignore
+from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent # type: ignore
+from isaaclab.utils.assets import retrieve_file_path # type: ignore
+from isaaclab.utils.dict import print_dict # type: ignore
+from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint # type: ignore
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper, export_policy_as_jit, export_policy_as_onnx # type: ignore
+from isaaclab_tasks.utils import get_checkpoint_path # type: ignore
 
-import unitree_rl_lab.tasks  # noqa: F401
-from unitree_rl_lab.utils.parser_cfg import parse_env_cfg
+import unitree_rl_lab.tasks  # noqa: F401 # type: ignore
+from unitree_rl_lab.utils.parser_cfg import parse_env_cfg # type: ignore
 
 
 def main():
@@ -74,7 +92,7 @@ def main():
         entry_point_key="play_env_cfg_entry_point",
     )
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
-
+    logger.info(f"Arguments: {agent_cfg}")
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
@@ -112,15 +130,41 @@ def main():
 
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
+    
+    logger.info(f"env.get_observations: {type(env.get_observations())}")
+    original_obs = env.get_observations
+    def patched_get_observations():
+        obs = original_obs()
+        if isinstance(obs, tuple) and len(obs) == 2:
+            return obs[1]['observations']
+        return obs
+    env.get_observations = patched_get_observations
+    # logger.info(f"obs_groups: {agent_cfg.to_dict()['obs_groups']}")
+    logger.info(f"obs_groups: {agent_cfg.to_dict().keys()}")
+    logger.info(f"Patched env.get_observations: {type(env.get_observations())}")
+    logger.info(f"Patched env.get_observations: {env.get_observations()}")
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    logger.info(f"Loading model checkpoint from: {resume_path}")
+    
+    
     # load previously trained model
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    agent_dict = agent_cfg.to_dict()
+    # 根据训练时的环境配置，设置正确的obs_groups
+    # 训练时：policy使用policy观察组(45维)，critic使用critic观察组(60维)
+    agent_dict["obs_groups"] = {
+        "policy": ["policy"],  # 策略网络使用 policy 观察组
+        "critic": ["critic"]   # critic网络使用 critic 观察组
+    }
+    runner = OnPolicyRunner(env, agent_dict, log_dir=None, device=agent_cfg.device)
+
+    # if agent_cfg.class_name == "OnPolicyRunner":
+    #     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    # elif agent_cfg.class_name == "DistillationRunner":
+    #     runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    # else:
+    #     raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    
+    # env.get_observations = original_obs
     runner.load(resume_path)
 
     # obtain the trained policy for inference
@@ -161,7 +205,9 @@ def main():
             # agent stepping
             actions = policy(obs)
             # env stepping
-            obs, _, _, _ = env.step(actions)
+            _ = env.step(actions)
+            # 获取正确格式的观察数据
+            obs = env.get_observations()
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
